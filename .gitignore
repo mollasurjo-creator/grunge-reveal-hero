@@ -1,0 +1,8 @@
+# Archives / Zip bundles
+*.zip
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
