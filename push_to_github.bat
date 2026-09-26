@@ -3,34 +3,31 @@ setlocal
 echo ==============================================
 echo   Push Interactive Grunge Reveal Hero to GitHub
 echo ==============================================
+echo Target: https://github.com/mollasurjo-creator/grunge-reveal-hero.git
 echo.
 
-set /p REPO_URL="Enter your GitHub Repository URL (e.g., https://github.com/username/grunge-reveal-hero.git): "
-
-if "%REPO_URL%"=="" (
-    echo Error: No repository URL provided.
-    pause
-    exit /b 1
-)
-
-echo.
-echo Setting up remote origin...
-git remote remove origin 2>nul
-git remote add origin %REPO_URL%
 git branch -M main
+git remote set-url origin https://github.com/mollasurjo-creator/grunge-reveal-hero.git 2>nul || git remote add origin https://github.com/mollasurjo-creator/grunge-reveal-hero.git
 
-echo.
-echo Pushing to GitHub...
+echo Pushing to GitHub main branch...
 git push -u origin main
 
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo ==============================================
-    echo   SUCCESS! Project uploaded to GitHub.
+    echo   SUCCESS! Uploaded to GitHub!
     echo ==============================================
+    echo Your repository: https://github.com/mollasurjo-creator/grunge-reveal-hero
+    echo.
+    echo To enable GitHub Pages:
+    echo 1. Go to https://github.com/mollasurjo-creator/grunge-reveal-hero/settings/pages
+    echo 2. Under 'Branch', select 'main' and save.
+    echo 3. Your site will be live at:
+    echo    https://mollasurjo-creator.github.io/grunge-reveal-hero/
 ) else (
     echo.
-    echo Failed to push. Please verify the URL and your GitHub permissions.
+    echo If push failed, make sure you created the empty repository on GitHub first:
+    echo https://github.com/new
 )
 
 pause
