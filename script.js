@@ -1,365 +1,267 @@
-(function () {
+(() => {
   'use strict';
 
   const canvas = document.getElementById('reveal-canvas');
-  const ctx = canvas.getContext('2d', { alpha: true });
   const hero = document.getElementById('hero');
-  const resetBtn = document.getElementById('reset-btn');
+  const resetButton = document.getElementById('reset-btn');
+  const context = canvas?.getContext('2d', { alpha: true });
+  if (!canvas || !hero || !context) return;
 
-  // Load IMAGE 1
-  const img1 = new Image();
-  img1.src = 'image1.jpg';
-  let img1Loaded = false;
-  img1.onload = () => {
-    img1Loaded = true;
-    renderInitialCover();
-  };
+  const image = new Image();
+  image.src = 'image1.jpg';
 
-  // State tracking
-  let width = window.innerWidth;
-  let height = window.innerHeight;
-  let dpr = Math.min(window.devicePixelRatio || 1, 2);
-
-  // Follower physics
-  let sx = 0, sy = 0; // smoothed follower position
-  let tx = 0, ty = 0; // target cursor position
-  let lastStampX = 0, lastStampY = 0;
-  let hasEntered = false;
-  let isCursorInside = false;
-  let lastTime = performance.now();
-
-  // Brush stamp collection
-  // Each stamp: { x, y, baseRadius, angle, born, seed, speed }
+  const STAMP_LIFETIME = 2.7;
+  const SAMPLE_COUNT = 36;
+  const MAX_STAMPS = 240;
   const stamps = [];
-  const STAMP_LIFETIME = 2.7; // 2.7 seconds exactly
-  const SAMPLE_COUNT = 48; // ~48 perimeter samples
+  let width = 0;
+  let height = 0;
+  let dpr = 1;
+  let targetX = 0;
+  let targetY = 0;
+  let brushX = 0;
+  let brushY = 0;
+  let lastStampX = 0;
+  let lastStampY = 0;
+  let pointerActive = false;
+  let hasPosition = false;
+  let frameId = 0;
+  let lastFrameTime = 0;
 
-  // Compute cover destination rectangle matching CSS object-fit: cover
-  function getCoverRect(imgW, imgH, containerW, containerH) {
-    if (!imgW || !imgH) return { x: 0, y: 0, width: containerW, height: containerH };
-    const imgRatio = imgW / imgH;
-    const containerRatio = containerW / containerH;
-    let renderW, renderH, offsetX, offsetY;
-
-    if (containerRatio > imgRatio) {
-      renderW = containerW;
-      renderH = containerW / imgRatio;
-      offsetX = 0;
-      offsetY = (containerH - renderH) / 2;
-    } else {
-      renderH = containerH;
-      renderW = containerH * imgRatio;
-      offsetX = (containerW - renderW) / 2;
-      offsetY = 0;
-    }
-    return { x: offsetX, y: offsetY, width: renderW, height: renderH };
+  function coverRect(imageWidth, imageHeight) {
+    const scale = Math.max(width / imageWidth, height / imageHeight);
+    const renderWidth = imageWidth * scale;
+    const renderHeight = imageHeight * scale;
+    return {
+      x: (width - renderWidth) / 2,
+      y: (height - renderHeight) / 2,
+      width: renderWidth,
+      height: renderHeight
+    };
   }
 
   function resize() {
-    width = window.innerWidth;
-    height = window.innerHeight;
+    const bounds = hero.getBoundingClientRect();
+    width = bounds.width;
+    height = bounds.height;
     dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    canvas.style.width = width + 'px';
-    canvas.style.height = height + 'px';
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    draw(performance.now() / 1000);
   }
 
-  window.addEventListener('resize', resize);
-  resize();
-
-  function renderInitialCover() {
-    if (!img1Loaded) return;
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, width, height);
-    const rect = getCoverRect(img1.naturalWidth, img1.naturalHeight, width, height);
-    ctx.drawImage(img1, rect.x, rect.y, rect.width, rect.height);
-    ctx.restore();
+  function drawInitialImage() {
+    if (!image.complete || !image.naturalWidth) return;
+    context.save();
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const rect = coverRect(image.naturalWidth, image.naturalHeight);
+    context.drawImage(image, rect.x, rect.y, rect.width, rect.height);
+    context.restore();
   }
 
-  // Catmull-Rom closed curve conversion to cubic Bézier
-  function traceCatmullRomClosed(context, pts) {
-    const n = pts.length;
-    if (n < 3) return;
-    context.moveTo(pts[0].x, pts[0].y);
-    for (let i = 0; i < n; i++) {
-      const p0 = pts[(i - 1 + n) % n];
-      const p1 = pts[i];
-      const p2 = pts[(i + 1) % n];
-      const p3 = pts[(i + 2) % n];
+  function addStamp(x, y, angle, speed, now) {
+    const radius = Math.min(width, height) * 0.18;
+    stamps.push({ x, y, radius, angle, speed, born: now, seed: Math.random() * 1000 });
+    if (stamps.length > MAX_STAMPS) stamps.splice(0, stamps.length - MAX_STAMPS);
+  }
 
-      const cp1x = p1.x + (p2.x - p0.x) / 6;
-      const cp1y = p1.y + (p2.y - p0.y) / 6;
-      const cp2x = p2.x - (p3.x - p1.x) / 6;
-      const cp2y = p2.y - (p3.y - p1.y) / 6;
+  function startAt(x, y) {
+    targetX = brushX = lastStampX = x;
+    targetY = brushY = lastStampY = y;
+    pointerActive = true;
+    hasPosition = true;
+    addStamp(x, y, 0, 0, performance.now() / 1000);
+    requestRender();
+  }
 
-      context.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+  function onPointerMove(event) {
+    // Coalesced events preserve fine pointer detail on high-rate devices without
+    // forcing a render for every hardware sample.
+    const samples = event.getCoalescedEvents?.() || [event];
+    const point = samples[samples.length - 1];
+    const bounds = hero.getBoundingClientRect();
+    const x = point.clientX - bounds.left;
+    const y = point.clientY - bounds.top;
+    if (!hasPosition || !pointerActive) {
+      startAt(x, y);
+      return;
+    }
+    targetX = x;
+    targetY = y;
+    requestRender();
+  }
+
+  function traceBrush(stamp, radius, now) {
+    const points = [];
+    const age = now - stamp.born;
+    const seed = stamp.seed;
+    const stretch = Math.min(1.3, 1.08 + stamp.speed * 0.00035);
+    const squeeze = 1 / Math.sqrt(stretch);
+    const cosDirection = Math.cos(stamp.angle);
+    const sinDirection = Math.sin(stamp.angle);
+    const wobble = age * 0.4;
+
+    for (let i = 0; i < SAMPLE_COUNT; i++) {
+      const angle = (i / SAMPLE_COUNT) * Math.PI * 2;
+      const roughness =
+        0.085 * Math.sin(3 * angle + wobble + seed) +
+        0.048 * Math.sin(5 * angle - wobble * 1.15 + seed * 2.1) +
+        0.022 * Math.sin(9 * angle + wobble * 0.6 + seed * 3.7) +
+        0.035 * Math.sin(17 * angle + seed * 4.3) +
+        0.018 * Math.cos(31 * angle - seed * 1.7) +
+        (Math.sin(6 * angle + seed * 1.5) > 0.88 ? -0.12 : 0);
+      const r = radius * Math.max(0.2, 1 + roughness);
+      const localX = r * stretch * Math.cos(angle);
+      const localY = r * squeeze * Math.sin(angle);
+      points.push({
+        x: stamp.x + localX * cosDirection - localY * sinDirection,
+        y: stamp.y + localX * sinDirection + localY * cosDirection
+      });
+    }
+    return points;
+  }
+
+  function traceClosedCurve(points) {
+    const count = points.length;
+    context.moveTo(points[0].x, points[0].y);
+    for (let i = 0; i < count; i++) {
+      const p0 = points[(i - 1 + count) % count];
+      const p1 = points[i];
+      const p2 = points[(i + 1) % count];
+      const p3 = points[(i + 2) % count];
+      context.bezierCurveTo(
+        p1.x + (p2.x - p0.x) / 6,
+        p1.y + (p2.y - p0.y) / 6,
+        p2.x - (p3.x - p1.x) / 6,
+        p2.y - (p3.y - p1.y) / 6,
+        p2.x,
+        p2.y
+      );
     }
     context.closePath();
   }
 
-  // Build procedural dry-brush polygon points with multiscale harmonics + directional stretch
-  function getBrushPerimeter(stamp, currentRadius, currentTime) {
-    const pts = [];
-    const baseR = currentRadius;
-    const seed = stamp.seed;
-    const time = (currentTime - stamp.born) * 0.4;
-    const dirAngle = stamp.angle;
+  function addBristleHoles(stamp, radius) {
+    const holeCount = 2 + Math.floor(stamp.seed % 3);
+    const alongX = Math.cos(stamp.angle);
+    const alongY = Math.sin(stamp.angle);
+    const acrossX = -alongY;
+    const acrossY = alongX;
 
-    // Slight stretch in movement direction (not over-stretched or over-rotated)
-    const stretchRatio = Math.min(1.30, 1.08 + (stamp.speed || 0) * 0.00035);
-    const compressRatio = 1 / Math.sqrt(stretchRatio);
+    for (let i = 0; i < holeCount; i++) {
+      const seed = stamp.seed + i * 137.5;
+      const offset = radius * (0.15 + (Math.sin(seed) * 0.5 + 0.5) * 0.45);
+      const direction = stamp.angle + Math.PI / 2 + (i % 2 ? Math.PI : 0);
+      const x = stamp.x + Math.cos(direction) * offset;
+      const y = stamp.y + Math.sin(direction) * offset;
+      const length = radius * (0.35 + Math.sin(seed * 1.3) * 0.15);
+      const halfWidth = radius * (0.05 + Math.sin(seed * 2.1) * 0.02);
 
-    const cosDir = Math.cos(dirAngle);
-    const sinDir = Math.sin(dirAngle);
-
-    for (let i = 0; i < SAMPLE_COUNT; i++) {
-      const a = (i / SAMPLE_COUNT) * Math.PI * 2;
-
-      // Specified multi-frequency radius formula + additional micro-irregularities
-      const harmonic1 = 0.085 * Math.sin(3 * a + time + seed);
-      const harmonic2 = 0.048 * Math.sin(5 * a - time * 1.15 + seed * 2.1);
-      const harmonic3 = 0.022 * Math.sin(9 * a + time * 0.6 + seed * 3.7);
-
-      // Additional high-frequency dry-bristle serration & torn edge notches
-      const bristleJitter = 0.035 * Math.sin(17 * a + seed * 4.3) +
-                            0.018 * Math.cos(31 * a - seed * 1.7);
-
-      // Deep occasional dry-bristle clefts
-      const notch = (Math.sin(6 * a + seed * 1.5) > 0.88) ? -0.12 : 0;
-
-      const r = baseR * Math.max(0.2, (1 + harmonic1 + harmonic2 + harmonic3 + bristleJitter + notch));
-
-      // Local coordinates stretched along direction
-      const localX = r * stretchRatio * Math.cos(a);
-      const localY = r * compressRatio * Math.sin(a);
-
-      // Rotate to align with movement angle
-      const rotX = stamp.x + (localX * cosDir - localY * sinDir);
-      const rotY = stamp.y + (localX * sinDir + localY * cosDir);
-
-      pts.push({ x: rotX, y: rotY });
+      context.moveTo(x - alongX * length, y - alongY * length);
+      context.bezierCurveTo(
+        x - alongX * length + acrossX * halfWidth,
+        y - alongY * length + acrossY * halfWidth,
+        x + alongX * length + acrossX * halfWidth,
+        y + alongY * length + acrossY * halfWidth,
+        x + alongX * length,
+        y + alongY * length
+      );
+      context.bezierCurveTo(
+        x + alongX * length - acrossX * halfWidth,
+        y + alongY * length - acrossY * halfWidth,
+        x - alongX * length - acrossX * halfWidth,
+        y - alongY * length - acrossY * halfWidth,
+        x - alongX * length,
+        y - alongY * length
+      );
     }
-    return pts;
   }
 
-  // Add a stamp at (px, py)
-  function addStamp(px, py, angle, speed, now) {
-    const baseRadius = Math.min(width, height) * 0.18; // 15-20% of smaller viewport dimension
-    stamps.push({
-      x: px,
-      y: py,
-      baseRadius: baseRadius,
-      angle: angle,
-      born: now,
-      seed: Math.random() * 1000,
-      speed: speed
-    });
-  }
+  function draw(now) {
+    if (!image.complete || !image.naturalWidth || !width || !height) return;
+    context.save();
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const rect = coverRect(image.naturalWidth, image.naturalHeight);
+    context.drawImage(image, rect.x, rect.y, rect.width, rect.height);
 
-  // Mouse / Pointer handlers
-  function handlePointerMove(clientX, clientY) {
-    const now = performance.now() / 1000;
-
-    if (!hasEntered) {
-      // Immediately set follower to cursor position so no unwanted stroke connects from old position
-      sx = clientX;
-      sy = clientY;
-      tx = clientX;
-      ty = clientY;
-      lastStampX = clientX;
-      lastStampY = clientY;
-      hasEntered = true;
-      isCursorInside = true;
-      // Add first stamp at initial touch/entry
-      addStamp(clientX, clientY, 0, 0, now);
-      return;
-    }
-
-    if (!isCursorInside) {
-      // Re-entering: start fresh from new cursor position without connecting
-      sx = clientX;
-      sy = clientY;
-      tx = clientX;
-      ty = clientY;
-      lastStampX = clientX;
-      lastStampY = clientY;
-      isCursorInside = true;
-      addStamp(clientX, clientY, 0, 0, now);
-      return;
-    }
-
-    tx = clientX;
-    ty = clientY;
-  }
-
-  hero.addEventListener('pointerenter', (e) => {
-    handlePointerMove(e.clientX, e.clientY);
-  });
-
-  hero.addEventListener('pointermove', (e) => {
-    handlePointerMove(e.clientX, e.clientY);
-  });
-
-  hero.addEventListener('pointerleave', () => {
-    isCursorInside = false;
-  });
-
-  // Mobile Touch Handling with exact same behavior
-  hero.addEventListener('touchstart', (e) => {
-    if (e.touches.length > 0) {
-      const t = e.touches[0];
-      handlePointerMove(t.clientX, t.clientY);
-    }
-  }, { passive: true });
-
-  hero.addEventListener('touchmove', (e) => {
-    if (e.touches.length > 0) {
-      const t = e.touches[0];
-      handlePointerMove(t.clientX, t.clientY);
-    }
-  }, { passive: true });
-
-  hero.addEventListener('touchend', () => {
-    isCursorInside = false;
-  });
-
-  if (resetBtn) {
-    resetBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      stamps.length = 0;
-      renderInitialCover();
-    });
-  }
-
-  // Main Animation Loop
-  function animate(nowMs) {
-    requestAnimationFrame(animate);
-
-    const now = nowMs / 1000;
-    const dt = Math.min((nowMs - lastTime) / 1000, 0.1);
-    lastTime = nowMs;
-
-    // Smooth cursor following
-    if (isCursorInside) {
-      const k = 1 - Math.pow(1 - 0.17, dt * 60);
-      const prevSx = sx;
-      const prevSy = sy;
-
-      sx += (tx - sx) * k;
-      sy += (ty - sy) * k;
-
-      const dx = sx - lastStampX;
-      const dy = sy - lastStampY;
-      const distFromLast = Math.hypot(dx, dy);
-
-      const baseRadius = Math.min(width, height) * 0.18;
-      // Continuous spacing: approximately brushRadius * 0.09
-      const stepDist = baseRadius * 0.09;
-
-      if (distFromLast >= stepDist) {
-        const steps = Math.floor(distFromLast / stepDist);
-        const moveAngle = Math.atan2(sy - prevSy, sx - prevSx) || 0;
-        const instSpeed = distFromLast / Math.max(dt, 0.001);
-
-        for (let i = 1; i <= steps; i++) {
-          const fraction = i / steps;
-          const px = lastStampX + dx * fraction;
-          const py = lastStampY + dy * fraction;
-          addStamp(px, py, moveAngle, instSpeed, now);
-        }
-        lastStampX += dx * (steps / (distFromLast / stepDist));
-        lastStampY += dy * (steps / (distFromLast / stepDist));
-      }
-    }
-
-    // Clean up expired stamps
+    context.globalCompositeOperation = 'destination-out';
     for (let i = stamps.length - 1; i >= 0; i--) {
-      const age = now - stamps[i].born;
-      if (age >= STAMP_LIFETIME) {
+      const stamp = stamps[i];
+      const life = 1 - (now - stamp.born) / STAMP_LIFETIME;
+      if (life <= 0) {
         stamps.splice(i, 1);
+        continue;
       }
+      const radius = stamp.radius * Math.pow(life, 0.85);
+      if (radius <= 0.5) continue;
+      const perimeter = traceBrush(stamp, radius, now);
+      context.beginPath();
+      traceClosedCurve(perimeter);
+      addBristleHoles(stamp, radius);
+      context.fill('evenodd');
     }
-
-    if (!img1Loaded) return;
-
-    // Render frame
-    ctx.save();
-    ctx.scale(dpr, dpr);
-
-    // 1. Clear frame
-    ctx.clearRect(0, 0, width, height);
-
-    // 2. Draw IMAGE 1 (top default image)
-    const rect = getCoverRect(img1.naturalWidth, img1.naturalHeight, width, height);
-    ctx.drawImage(img1, rect.x, rect.y, rect.width, rect.height);
-
-    // 3. Cut out active brush stamps using destination-out
-    if (stamps.length > 0) {
-      ctx.globalCompositeOperation = 'destination-out';
-      ctx.fillStyle = '#000000';
-
-      for (let i = 0; i < stamps.length; i++) {
-        const stamp = stamps[i];
-        const age = now - stamp.born;
-        const life = Math.max(0, 1 - age / STAMP_LIFETIME);
-
-        // Physical shrinking formula specified:
-        // radius = originalRadius * Math.pow(life, 0.85)
-        // (new = large, 1s = smaller, 2s = very small, 2.7s = gone)
-        const currentRadius = stamp.baseRadius * Math.pow(life, 0.85);
-
-        if (currentRadius <= 0.5) continue;
-
-        // Generate organic Catmull-Rom perimeter
-        const perimeterPts = getBrushPerimeter(stamp, currentRadius, now);
-
-        ctx.beginPath();
-        traceCatmullRomClosed(ctx, perimeterPts);
-
-        // Realistic dry-brush internal elongated bristle slits/holes
-        // These internal cutouts use evenodd so they leave fine strands of Image 1 intact
-        const holeCount = 2 + Math.floor((stamp.seed % 3));
-        for (let h = 0; h < holeCount; h++) {
-          const hSeed = stamp.seed + h * 137.5;
-          const hOffsetDist = currentRadius * (0.15 + (Math.sin(hSeed) * 0.5 + 0.5) * 0.45);
-          const hOffsetAngle = stamp.angle + Math.PI / 2 + ((h % 2 === 0) ? 0 : Math.PI);
-          const hcx = stamp.x + Math.cos(hOffsetAngle) * hOffsetDist;
-          const hcy = stamp.y + Math.sin(hOffsetAngle) * hOffsetDist;
-
-          const hLength = currentRadius * (0.35 + Math.sin(hSeed * 1.3) * 0.15);
-          const hWidth = currentRadius * (0.05 + Math.sin(hSeed * 2.1) * 0.02);
-
-          // Elongated irregular capsule aligned along stroke
-          const hCos = Math.cos(stamp.angle);
-          const hSin = Math.sin(stamp.angle);
-          const pCos = -hSin;
-          const pSin = hCos;
-
-          // Draw hole counter to main contour for evenodd winding
-          ctx.moveTo(hcx - hCos * hLength, hcy - hSin * hLength);
-          ctx.bezierCurveTo(
-            hcx - hCos * hLength + pCos * hWidth, hcy - hSin * hLength + pSin * hWidth,
-            hcx + hCos * hLength + pCos * hWidth, hcy + hSin * hLength + pSin * hWidth,
-            hcx + hCos * hLength, hcy + hSin * hLength
-          );
-          ctx.bezierCurveTo(
-            hcx + hCos * hLength - pCos * hWidth, hcy + hSin * hLength - pSin * hWidth,
-            hcx - hCos * hLength - pCos * hWidth, hcy - hSin * hLength - pSin * hWidth,
-            hcx - hCos * hLength, hcy - hSin * hLength
-          );
-        }
-
-        ctx.fill('evenodd');
-      }
-
-      // 4. Reset composite operation to source-over
-      ctx.globalCompositeOperation = 'source-over';
-    }
-
-    ctx.restore();
+    context.restore();
   }
 
-  requestAnimationFrame(animate);
+  function renderFrame(nowMs) {
+    frameId = 0;
+    const now = nowMs / 1000;
+    const dt = lastFrameTime ? Math.min((nowMs - lastFrameTime) / 1000, 0.05) : 1 / 60;
+    lastFrameTime = nowMs;
+
+    if (pointerActive) {
+      const smoothing = 1 - Math.pow(1 - 0.17, dt * 60);
+      const previousX = brushX;
+      const previousY = brushY;
+      brushX += (targetX - brushX) * smoothing;
+      brushY += (targetY - brushY) * smoothing;
+
+      const dx = brushX - lastStampX;
+      const dy = brushY - lastStampY;
+      const distance = Math.hypot(dx, dy);
+      const spacing = Math.max(4, Math.min(width, height) * 0.18 * 0.09);
+      if (distance >= spacing) {
+        const steps = Math.floor(distance / spacing);
+        const angle = Math.atan2(brushY - previousY, brushX - previousX);
+        const speed = distance / Math.max(dt, 0.001);
+        const unitX = dx / distance;
+        const unitY = dy / distance;
+        for (let i = 1; i <= steps; i++) {
+          addStamp(lastStampX + unitX * spacing * i, lastStampY + unitY * spacing * i, angle, speed, now);
+        }
+        lastStampX += unitX * spacing * steps;
+        lastStampY += unitY * spacing * steps;
+      }
+    }
+
+    draw(now);
+    const stillFollowing = pointerActive && Math.hypot(targetX - brushX, targetY - brushY) > 0.5;
+    if (stamps.length || stillFollowing) requestRender();
+  }
+
+  function requestRender() {
+    if (!frameId) frameId = requestAnimationFrame(renderFrame);
+  }
+
+  hero.addEventListener('pointerenter', onPointerMove);
+  hero.addEventListener('pointermove', onPointerMove);
+  hero.addEventListener('pointerleave', () => {
+    pointerActive = false;
+    requestRender();
+  });
+
+  resetButton?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    stamps.length = 0;
+    drawInitialImage();
+  });
+
+  image.addEventListener('load', drawInitialImage);
+  image.addEventListener('error', () => console.error('Unable to load image1.jpg for the reveal canvas.'));
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
 })();
